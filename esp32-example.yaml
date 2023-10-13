@@ -1,0 +1,207 @@
+substitutions:
+  name: tdb-shunt
+  device_description: Interface to UART streem on TDB Smartshunt
+
+globals:
+  - id: total_energy_in
+    type: float
+    restore_value: yes
+    initial_value: '0'
+  - id: total_energy_out
+    type: float
+    restore_value: yes
+    initial_value: '0'
+  - id: capacity
+    type: float
+    restore_value: yes
+    initial_value: '0'
+  - id: current_stored_energy
+    type: float
+    restore_value: yes
+    initial_value: '0'
+  - id: efficiency
+    type: float
+    restore_value: yes
+    initial_value: '1'
+  - id: discharged_voltage
+    type: float
+    restore_value: yes
+    initial_value: '48'
+  - id: charged_voltage
+    type: float
+    restore_value: yes
+    initial_value: '56'
+  - id: reset_energy_state
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: set_charged_state
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: set_discharged_state
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+esphome:
+  name: ${name}
+  comment: ${device_description}
+
+esp32:
+  board: wemos_d1_mini32
+  framework:
+    type: esp-idf
+
+logger:
+  level: WARN
+  baud_rate: 0
+
+uart:
+  - id: uart_bus
+    baud_rate: 115200
+    data_bits: 8
+    stop_bits: 1
+    parity: NONE  
+    tx_pin: GPIO17
+    rx_pin: GPIO16
+    rx_buffer_size: 256
+
+api:
+ota:
+
+preferences:
+  flash_write_interval: 5min
+
+tbd_smart_shunt:
+  uart_id: uart_bus
+
+number:
+  - platform: template
+    name: "${name} battery capacity"
+    unit_of_measurement: "kWh"
+    max_value: 100
+    min_value: 1
+    step: 0.1
+    lambda: |-
+      return id(capacity) / 1000.0;
+    set_action:
+      lambda: |-
+        id(capacity) = x * 1000.0;
+
+  - platform: template
+    name: "${name} battery charge efficiency"
+    max_value: 2.0
+    min_value: 0.5
+    step: 0.01
+    lambda: |-
+      return id(efficiency);
+    set_action:
+      lambda: |-
+        id(efficiency) = x;
+
+  - platform: template
+    name: "${name} stored energy"
+    unit_of_measurement: "kWh"
+    max_value: 100
+    min_value: 1
+    step: 0.1
+    lambda: |-
+      return id(current_stored_energy) / 1000.0;
+    set_action:
+      lambda: |-
+        id(current_stored_energy) = x * 1000.0;
+
+sensor:
+  - platform: template
+    name: "${name} total charge energy"
+    accuracy_decimals: ${accuracy}
+    lambda: |-
+      return id(total_energy_in);
+    update_interval: 5s
+
+  - platform: template
+    name: "${name} total discharge energy"
+    accuracy_decimals: ${accuracy}
+    lambda: |-
+      return id(total_energy_out);
+    update_interval: 5s
+
+  - platform: template
+    name: "${name} shunt state of charge"
+    accuracy_decimals: ${accuracy}
+    lambda: |-
+      if ((id(current_stored_energy) <= id(capacity)) && (id(current_stored_energy) > 0)) {
+        return 100.0 * id(current_stored_energy) / id(capacity);
+      } else {
+        return 0;
+      }
+    update_interval: 5s
+
+  - platform: tbd_smart_shunt
+    battery_voltage:
+      name: "${name} Battery Voltage"
+      id: bv
+
+    battery_current:
+      name: "${name} Battery Current"
+      id: bc
+
+    instantaneous_power:
+      name: "${name} instantaneous power"
+      id: ipow
+      on_value:
+        then:
+          lambda: |-
+            static uint32_t last_update_time = 0;
+            if (last_update_time != 0) {
+              uint32_t dt = millis() - last_update_time;
+              float energy = x * static_cast<float>(dt) / (1000.0 * 3600.0);
+              if (energy < 0) {
+                energy = -energy;
+                id(total_energy_out) = id(total_energy_out) + energy;
+                if (energy > id(current_stored_energy)) {
+                  id(capacity) = id(capacity) + energy - id(current_stored_energy);
+                  id(current_stored_energy) = 0;
+                } else {
+                  id(current_stored_energy) = id(current_stored_energy) - energy;
+                }
+              } else {
+                id(total_energy_in) = id(total_energy_in) + energy;
+                float new_capacity = id(current_stored_energy) + energy;
+                if (new_capacity > id(capacity)) {
+                  id(capacity) = new_capacity;
+                  id(current_stored_energy) = new_capacity;
+                } else {
+                  id(current_stored_energy) = id(current_stored_energy) + energy;
+                }
+              }
+            }
+            last_update_time = millis();
+
+switch:
+  - platform: template
+    name: "${name} reset energy stats"
+    lambda: |-
+      return id(reset_energy_state);
+    turn_on_action:
+      lambda: |-
+        id(total_energy_in) = 0.0;
+        id(total_energy_out) = 0.0;
+        id(current_stored_energy) = 0.0;
+
+  - platform: template
+    name: "${name} set discharged state"
+    lambda: |-
+      return id(set_discharged_state);
+    turn_on_action:
+      lambda: |-
+        id(current_stored_energy) = 0.0;
+
+  - platform: template
+    name: "${name} set charged state"
+    lambda: |-
+      return id(set_charged_state);
+    turn_on_action:
+      lambda: |-
+        id(current_stored_energy) = id(capacity);
